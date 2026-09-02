@@ -1,0 +1,12 @@
+{
+  "name": "colorful-hand-tracker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Hand tracking video editor with APC Mini Mk2 MIDI bridge",
+  "scripts": {
+    "bridge": "node midi-bridge.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
