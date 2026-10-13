@@ -9,7 +9,7 @@
     /*
       Declare Besport as a local system font so the browser's canvas
       renderer can find it. If you also have the .ttf/.otf file, copy it
-      into a  fonts/  folder and add the url() source below.
+      into a fonts/ folder and add the url() source below.
     */
     @font-face {
       font-family: "Besport";
@@ -20,16 +20,41 @@
 
     *, *::before, *::after { box-sizing: border-box; }
 
-    body {
+    html, body {
       margin: 0;
       padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #000;
+    }
+
+    body {
       display: flex;
       justify-content: center;
       align-items: center;
-      height: 100vh;
-      background: #000;
       font-family: "Besport", sans-serif;
       color: #fff;
+      user-select: none;
+    }
+
+    /* Seamlessly scale the camera / project canvas to fit the screen */
+    canvas {
+      display: block;
+      width: min(100vw, calc(100vh * (16 / 9))) !important;
+      height: min(100vh, calc(100vw * (9 / 16))) !important;
+      max-width: 100vw !important;
+      max-height: 100vh !important;
+      aspect-ratio: 16 / 9;
+      object-fit: contain;
+    }
+
+    /* Stretch fill for non-16:9 displays if toggled */
+    body.fill-screen canvas {
+      width: 100vw !important;
+      height: 100vh !important;
+      max-width: 100vw !important;
+      max-height: 100vh !important;
     }
 
     #loading-message {
@@ -52,10 +77,19 @@
 <body>
   <div id="loading-message">LOADING</div>
 
-  <!-- MIDI controller (plain script, not a module) -->
+  <!-- Tone.js Audio Library -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+
+  <!-- MIDI controller (WebSocket client to midi-bridge.js) -->
   <script src="midi-controller.js"></script>
 
+  <!-- Music mode engine -->
+  <script src="music-tracks.js?v=20"></script>
+
+  <!-- Control the World mode engine -->
+  <script src="control-world.js?v=11"></script>
+
   <!-- Main app — ES module for CDN imports -->
-  <script type="module" src="colorful-track.js?v=9"></script>
+  <script type="module" src="colorful-track.js?v=27"></script>
 </body>
 </html>

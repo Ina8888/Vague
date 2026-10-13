@@ -12,7 +12,7 @@ let hands;
 
 let appState         = "CAMERA_VIEW";
 let activeVideo      = null;
-let selectedEditMode = null;  // 'music-play'|'effect-bomb'|'pixelate'|'color-grade'
+let selectedEditMode = null;  // 'color-video' | 'effect-bomb' | 'pixelate' | 'color-grade'
 
 // Hover tracking
 let hoveredModeId     = null;
@@ -21,13 +21,14 @@ let hoveredVideoIndex = -1;
 
 // Gesture state
 let pinchClosed          = false;
-let pinchCooldownUntil   = 0;   // time-based block — pinch can't fire until this passes
+let pinchCooldownUntil   = 0;
 let gestureCooldownUntil = 0;
+let cwRightFistSince     = 0; // sustained-fist timer for CONTROL_WORLD_VIEW exit
 let pixelBuffer;
-
+let sampleBuffer; // Fast 8x8 buffer for zero-delay MIDI color projection
 
 // ─────────────────────────────────────────────────────────────
-// EFFECT BOMB state
+// EFFECT BOMB state (purely hand-tracking)
 // ─────────────────────────────────────────────────────────────
 const EFFECTS = [
   { name: "NORMAL",        filter: "none" },
@@ -39,13 +40,19 @@ const EFFECTS = [
   { name: "ICE COLD",      filter: "hue-rotate(200deg) saturate(2)" },
 ];
 let currentEffectIndex = 0;
-let effectGestureLatch = false; // prevents rapid cycling on a held gesture
+let effectGestureLatch = false;
 
 // ─────────────────────────────────────────────────────────────
-// COLOR GRADE state
+// COLOR GRADE state (purely hand-tracking)
 // ─────────────────────────────────────────────────────────────
 let colorGradeActive = false;
 let colorGradeLatch  = false;
+
+// ─────────────────────────────────────────────────────────────
+// COLOR VIDEO (MIDI Projection) state
+// ─────────────────────────────────────────────────────────────
+let lastMidiLightUpdate = 0;
+const MIDI_LIGHT_INTERVAL = 35; // ~28 fps real-time pad projection with zero delay
 
 // ─────────────────────────────────────────────────────────────
 // Constants
@@ -53,13 +60,12 @@ let colorGradeLatch  = false;
 const GESTURE_COOLDOWN_MS  = 900;
 const PINCH_ON_PX          = 55;
 const PINCH_OFF_PX         = 85;
-const PINKY_THUMB_TOUCH_PX = 60; // pixel threshold for pinky+thumb contact
+const PINKY_THUMB_TOUCH_PX = 60;
 const NEON                 = [0, 230, 255];
 const FONT                 = "Besport";
 
 // ─────────────────────────────────────────────────────────────
-// Video Library — edit titles/subtitles/src to match your files.
-// Put .mp4 files in a  videos/  folder next to index.html.
+// Video Library — edit titles/subtitles/src to match your files
 // ─────────────────────────────────────────────────────────────
 const VIDEO_LIBRARY = [
   { title: "WINDSURFING",   subtitle: "VIDEO 1", src: "videos/video1.mp4" },
@@ -80,7 +86,8 @@ function hideLoading() {
 window.setup = function () {
   createCanvas(960, 540);
   textFont(FONT);
-  pixelBuffer = createGraphics(160, 120);
+  pixelBuffer  = createGraphics(160, 120);
+  sampleBuffer = createGraphics(8, 8); // Dedicated 8x8 buffer for APC pads
   capture = createCapture(VIDEO);
   capture.hide();
 };
@@ -103,6 +110,12 @@ window.draw = function () {
     case "EDIT_MODE_VIEW":  drawEditModeMenu();  break;
     case "VIDEOS_PAGE":     drawVideosPage();    break;
     case "VIDEO_VIEW":      drawVideoPlayback(); break;
+    case "MUSIC_VIEW":
+      if (window.MusicEngine) window.MusicEngine.draw();
+      break;
+    case "CONTROL_WORLD_VIEW":
+      if (window.ControlWorld) window.ControlWorld.draw(capture);
+      break;
   }
 
   if (!capture || !capture.elt || capture.elt.readyState < 2) return;
@@ -145,7 +158,7 @@ function isFingerExtended(lm, tipIdx, baseIdx) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Hand state / gesture detection
+// Hand state
 // ─────────────────────────────────────────────────────────────
 function updateFingerState(landmarksArr, handednessesArr) {
   window.fingerState = [];
@@ -177,14 +190,31 @@ function updateFingerState(landmarksArr, handednessesArr) {
 
     if (millis() < gestureCooldownUntil) continue;
 
-    // Fist navigation: CAMERA_VIEW → menu, VIDEO_VIEW → video selection
     if (handType === "Right" && hand.isFist) {
       if (appState === "CAMERA_VIEW") {
         setAppState("MENU_VIEW");
       } else if (appState === "VIDEO_VIEW") {
         closeVideo();
         setAppState("VIDEOS_PAGE");
+      } else if (appState === "MUSIC_VIEW") {
+        if (window.resetMidiLights) window.resetMidiLights();
+        setAppState("MENU_VIEW");
+      } else if (appState === "CONTROL_WORLD_VIEW") {
+        // Sub-modes 1 (Portal), 2 (Draw) & 3 (Mandala): right fist disabled, spacebar only
+        const cwMode = window.ControlWorld && window.ControlWorld.state
+          ? window.ControlWorld.state.activeMode : 0;
+        if (cwMode !== 1 && cwMode !== 2 && cwMode !== 3) {
+          // Require fist to be sustained 600 ms to avoid accidental exits
+          if (cwRightFistSince === 0) cwRightFistSince = millis();
+          if (millis() - cwRightFistSince > 600) {
+            cwRightFistSince = 0;
+            setAppState("MENU_VIEW");
+          }
+        }
       }
+    } else if (handType === "Right") {
+      // Reset sustain timer whenever right hand is open
+      cwRightFistSince = 0;
     }
   }
 }
@@ -192,13 +222,12 @@ function updateFingerState(landmarksArr, handednessesArr) {
 function setAppState(next) {
   appState             = next;
   gestureCooldownUntil = millis() + GESTURE_COOLDOWN_MS;
-  pinchCooldownUntil   = millis() + 1000; // block pinch for 1s — time-based, bulletproof
+  pinchCooldownUntil   = millis() + 1000;
   pinchClosed          = false;
   hoveredModeId        = null;
   hoveredEditModeId    = null;
   hoveredVideoIndex    = -1;
 }
-
 
 function getRightHand() {
   const labeled = window.fingerState.find(h => h.type === "Right");
@@ -208,22 +237,23 @@ function getRightHand() {
     h.wristScreen.x > best.wristScreen.x ? h : best
   );
 }
+window.getRightHand = getRightHand;
 
 function getLeftHand() {
   return window.fingerState.find(h => h.type === "Left") || null;
 }
+window.getLeftHand = getLeftHand;
 
 // ─────────────────────────────────────────────────────────────
 // Gesture helpers
 // ─────────────────────────────────────────────────────────────
-
-// Returns true when left hand's pinky tip and thumb tip are touching
 function isPinkyThumbTouching(hand) {
   if (!hand) return false;
   const pk = hand.pinky.tipScreen;
   const th = hand.thumb.tipScreen;
   return Math.hypot(pk.x - th.x, pk.y - th.y) < PINKY_THUMB_TOUCH_PX;
 }
+window.isPinkyThumbTouching = isPinkyThumbTouching;
 
 // ─────────────────────────────────────────────────────────────
 // Button layout helpers
@@ -234,9 +264,9 @@ function getModeButtons() {
   const leftX = width / 2 - bw - gap / 2;
   const rightX = width / 2 + gap / 2;
   return [
-    { id: "video-edit",    lines: ["VIDEO EDIT"],          x: leftX,          y: topY,       w: bw, h: bh },
-    { id: "control-world", lines: ["CONTROL", "THE WORLD"],x: rightX,         y: topY,       w: bw, h: bh },
-    { id: "make-music",    lines: ["MAKE MUSIC"],          x: width/2 - bw/2, y: topY+bh+36, w: bw, h: bh },
+    { id: "video-edit",    lines: ["VIDEO EDIT"],           x: leftX,          y: topY,       w: bw, h: bh },
+    { id: "control-world", lines: ["CONTROL", "THE WORLD"], x: rightX,         y: topY,       w: bw, h: bh },
+    { id: "make-music",    lines: ["MAKE MUSIC"],           x: width/2 - bw/2, y: topY+bh+36, w: bw, h: bh },
   ];
 }
 
@@ -246,8 +276,8 @@ function getEditModeButtons() {
   const leftX = width / 2 - bw - gap / 2;
   const rightX = width / 2 + gap / 2;
   return [
-    { id: "music-play",  lines: ["MUSIC", "PLAY"],  x: leftX,  y: topY,        w: bw, h: bh },
-    { id: "effect-bomb", lines: ["EFFECT", "BOMB"], x: rightX, y: topY,        w: bw, h: bh },
+    { id: "color-video", lines: ["COLOR", "VIDEO"],  x: leftX,  y: topY,        w: bw, h: bh },
+    { id: "effect-bomb", lines: ["EFFECT", "BOMB"],  x: rightX, y: topY,        w: bw, h: bh },
     { id: "pixelate",    lines: ["PIXELATE"],        x: leftX,  y: topY+bh+gap, w: bw, h: bh },
     { id: "color-grade", lines: ["COLOR", "GRADE"],  x: rightX, y: topY+bh+gap, w: bw, h: bh },
   ];
@@ -267,23 +297,17 @@ function getVideoButtons() {
   return VIDEO_LIBRARY.map((_, i) => ({ ...pos[i], w: bw, h: bh }));
 }
 
-function pointInRect(p, b) {
-  return p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h;
+function pointInRect(p, b, pad = 0) {
+  if (!p || !b) return false;
+  return p.x >= b.x - pad && p.x <= b.x + b.w + pad && p.y >= b.y - pad && p.y <= b.y + b.h + pad;
 }
 
 // ─────────────────────────────────────────────────────────────
-// Pinch edge-detection with time-based cooldown
-//
-// After any setAppState() call, pinchCooldownUntil is set 1 second in
-// the future. rightPinchJustStarted() returns false for that entire
-// second, no matter what the hand is doing. This is identical in
-// approach to gestureCooldownUntil (fist lock) and is bulletproof
-// because it cannot be broken by MediaPipe dropping a frame.
+// Pinch edge-detection — time-based cooldown
 // ─────────────────────────────────────────────────────────────
 function rightPinchJustStarted(rh) {
   if (!rh || rh.isFist) { pinchClosed = false; return false; }
 
-  // Block during cooldown window — track pinchClosed but never fire
   if (millis() < pinchCooldownUntil) {
     pinchClosed = rh.isPinching;
     return false;
@@ -294,7 +318,6 @@ function rightPinchJustStarted(rh) {
   pinchClosed    = pinching;
   return started;
 }
-
 
 // ─────────────────────────────────────────────────────────────
 // Hover + click handling
@@ -307,14 +330,51 @@ function handleClicks() {
 
   if (!rh || rh.isFist) return;
   const tip = rh.index.tipScreen;
+  const pinchPt = {
+    x: (rh.index.tipScreen.x + rh.thumb.tipScreen.x) / 2,
+    y: (rh.index.tipScreen.y + rh.thumb.tipScreen.y) / 2,
+  };
 
   if (appState === "MENU_VIEW") {
     for (const btn of getModeButtons()) {
-      if (pointInRect(tip, btn)) hoveredModeId = btn.id;
+      if (pointInRect(tip, btn, 12) || pointInRect(pinchPt, btn, 12)) {
+        hoveredModeId = btn.id;
+      }
     }
-    if (rightPinchJustStarted(rh) && hoveredModeId === "video-edit") {
-      setAppState("EDIT_MODE_VIEW");
+    if (rightPinchJustStarted(rh)) {
+      let target = hoveredModeId;
+      if (!target) {
+        for (const btn of getModeButtons()) {
+          if (pointInRect(tip, btn, 24) || pointInRect(pinchPt, btn, 24)) {
+            target = btn.id;
+            break;
+          }
+        }
+      }
+      if (target === "video-edit") {
+        setAppState("EDIT_MODE_VIEW");
+      } else if (target === "make-music") {
+        setAppState("MUSIC_VIEW");
+        if (window.MusicEngine) window.MusicEngine.init();
+      } else if (target === "control-world") {
+        setAppState("CONTROL_WORLD_VIEW");
+        if (window.ControlWorld) window.ControlWorld.init();
+      }
     }
+    return;
+  }
+
+  if (appState === "MUSIC_VIEW") {
+    if (window.MusicEngine) {
+      window.MusicEngine.handleClicks(rh, rightPinchJustStarted(rh));
+    }
+    return;
+  }
+
+  if (appState === "CONTROL_WORLD_VIEW") {
+    const lh = getLeftHand();
+    const isPinch = rightPinchJustStarted(rh);
+    if (window.ControlWorld) window.ControlWorld.handleClicks(rh, lh, isPinch);
     return;
   }
 
@@ -324,8 +384,8 @@ function handleClicks() {
     }
     if (rightPinchJustStarted(rh) && hoveredEditModeId) {
       selectedEditMode   = hoveredEditModeId;
-      currentEffectIndex = 0;      // reset effect cycle for new session
-      colorGradeActive   = false;  // reset color grade activation
+      currentEffectIndex = 0;
+      colorGradeActive   = false;
       setAppState("VIDEOS_PAGE");
     }
     return;
@@ -357,6 +417,9 @@ function openVideo(entry) {
 }
 
 function closeVideo() {
+  if (window.resetMidiLights) {
+    window.resetMidiLights();
+  }
   if (!activeVideo) return;
   activeVideo.stop();
   activeVideo.remove();
@@ -364,9 +427,7 @@ function closeVideo() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// PIXELATE helpers
-// Right hand: two-hand wrist distance → pixel block size
-//             one-hand: Y position → volume
+// PIXELATE helpers (purely hand-tracking)
 // ─────────────────────────────────────────────────────────────
 function getLiveEffects() {
   const tracked = window.fingerState;
@@ -383,6 +444,7 @@ function getLiveEffects() {
     const yAvg = tracked.reduce((s, h) => s + h.wristScreen.y, 0) / tracked.length;
     volume = constrain(1 - yAvg / height, 0, 1);
   }
+
   return { pixelSize, volume };
 }
 
@@ -405,9 +467,7 @@ function renderPixelated(pixelSize) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// EFFECT BOMB helpers
-// Left hand pinky + thumb touch → cycle to next CSS filter effect.
-// Uses a latch so one touch = one cycle step (not continuous spinning).
+// EFFECT BOMB helpers (purely hand-tracking)
 // ─────────────────────────────────────────────────────────────
 function updateEffectBomb(leftHand) {
   const touching = isPinkyThumbTouching(leftHand);
@@ -415,16 +475,12 @@ function updateEffectBomb(leftHand) {
     currentEffectIndex = (currentEffectIndex + 1) % EFFECTS.length;
     effectGestureLatch = true;
   } else if (!touching) {
-    effectGestureLatch = false; // reset latch so next touch cycles again
+    effectGestureLatch = false;
   }
 }
 
 // ─────────────────────────────────────────────────────────────
-// COLOR GRADE helpers
-// Left hand pinky + thumb → toggles grade ON/OFF.
-// While ON, right hand X position controls brightness + saturation:
-//   hand on LEFT side  → bright (2×) + shallow/desaturated (0.3×)
-//   hand on RIGHT side → dark  (0.3×) + vivid/saturated   (2.5×)
+// COLOR GRADE helpers (purely hand-tracking)
 // ─────────────────────────────────────────────────────────────
 function updateColorGrade(leftHand, rightHand) {
   const touching = isPinkyThumbTouching(leftHand);
@@ -445,14 +501,104 @@ function updateColorGrade(leftHand, rightHand) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// COLOR VIDEO helpers (Akai APC mini Mk2 MIDI integration)
+// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// COLOR VIDEO helpers (Akai APC mini Mk2 MIDI integration)
+// ─────────────────────────────────────────────────────────────
+function drawMidiGridOverlay() {
+  const cw = width  / 8;
+  const ch = height / 8;
+  const now = millis();
+
+  for (let row = 0; row < 8; row++) {
+    for (let col = 0; col < 8; col++) {
+      const loc     = row * 8 + col;
+      const x       = col * cw;
+      const y       = row * ch;
+      const pressed = window.midiState?.pads?.[loc];
+
+      if (pressed) {
+        // Tile Glitch/Invert/Strobe effect on pressed cell
+        push();
+        // Invert the video colors inside this specific cell
+        drawingContext.save();
+        drawingContext.beginPath();
+        drawingContext.rect(x, y, cw, ch);
+        drawingContext.clip();
+
+        // Strobe flash & neon tint
+        blendMode(DIFFERENCE);
+        fill(255);
+        rect(x, y, cw, ch);
+        blendMode(BLEND);
+
+        drawingContext.restore();
+        pop();
+
+        // Glowing neon frame
+        stroke(NEON[0], NEON[1], NEON[2]);
+        strokeWeight(3.5);
+        fill(NEON[0], NEON[1], NEON[2], 90);
+        rect(x, y, cw, ch);
+
+        // Tech target crosshair in center of cell
+        stroke(255);
+        strokeWeight(1.5);
+        const mx = x + cw / 2;
+        const my = y + ch / 2;
+        line(mx - 8, my, mx + 8, my);
+        line(mx, my - 8, mx, my + 8);
+      } else {
+        // Faint grid lines for inactive cells
+        noFill();
+        stroke(255, 255, 255, 24);
+        strokeWeight(0.5);
+        rect(x, y, cw, ch);
+      }
+    }
+  }
+  noStroke(); noFill();
+}
+
+// Zero-delay color projection from video to APC pad LEDs
+function updateColorVideoProjection() {
+  if (!activeVideo || !window.midiState?.connected || !window.sendMidiLights) return;
+  if (millis() - lastMidiLightUpdate < MIDI_LIGHT_INTERVAL) return;
+  lastMidiLightUpdate = millis();
+
+  // Draw current video frame to tiny 8x8 buffer for instantaneous sampling
+  sampleBuffer.image(activeVideo, 0, 0, 8, 8);
+  const imgData = sampleBuffer.drawingContext.getImageData(0, 0, 8, 8).data;
+
+  const pads = [];
+  for (let loc = 0; loc < 64; loc++) {
+    const isPressed = window.midiState?.pads?.[loc];
+    if (isPressed) {
+      // Pressed pad flashes bright white on the physical controller!
+      pads.push({ location: loc, color: "#ffffff" });
+    } else {
+      const idx = loc * 4;
+      const r = imgData[idx];
+      const g = imgData[idx + 1];
+      const b = imgData[idx + 2];
+      const hex = "#" + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
+      pads.push({ location: loc, color: hex });
+    }
+  }
+
+  window.sendMidiLights(pads);
+}
+
+// ─────────────────────────────────────────────────────────────
 // Video playback renderer — branches on selectedEditMode
 // ─────────────────────────────────────────────────────────────
 function drawVideoPlayback() {
   const lh = getLeftHand();
   const rh = getRightHand();
 
-  // ── PIXELATE ─────────────────────────────────────────────
-  if (selectedEditMode === "pixelate" || selectedEditMode === null) {
+  // ── 1. PIXELATE (hand-tracking only) ───────────────────────
+  if (selectedEditMode === "pixelate") {
     const fx = getLiveEffects();
     if (activeVideo) activeVideo.volume(fx.volume);
     renderPixelated(fx.pixelSize);
@@ -460,19 +606,18 @@ function drawVideoPlayback() {
     return;
   }
 
-  // ── EFFECT BOMB ──────────────────────────────────────────
+  // ── 2. EFFECT BOMB (hand-tracking only) ────────────────────
   if (selectedEditMode === "effect-bomb") {
     updateEffectBomb(lh);
     const ef = EFFECTS[currentEffectIndex];
-    // Apply CSS filter to the video image via the canvas context
     drawingContext.filter = ef.filter;
     if (activeVideo) image(activeVideo, 0, 0, width, height);
-    drawingContext.filter = "none"; // always reset so HUD text is unaffected
+    drawingContext.filter = "none";
     drawVideoHUD(`EFFECT: ${ef.name}   |   LH PINKY+THUMB = NEXT`);
     return;
   }
 
-  // ── COLOR GRADE ──────────────────────────────────────────
+  // ── 3. COLOR GRADE (hand-tracking only) ────────────────────
   if (selectedEditMode === "color-grade") {
     const cg = updateColorGrade(lh, rh);
     drawingContext.filter = `brightness(${cg.brightness.toFixed(2)}) saturate(${cg.saturation.toFixed(2)})`;
@@ -485,20 +630,72 @@ function drawVideoPlayback() {
     return;
   }
 
-  // ── MUSIC PLAY (MIDI — coming soon) ──────────────────────
-  if (selectedEditMode === "music-play") {
-    if (activeVideo) image(activeVideo, 0, 0, width, height);
-    drawVideoHUD("MIDI  |  MIDI INTEGRATION COMING SOON");
+  // ── 4. COLOR VIDEO (Akai APC mini Mk2 MIDI only) ───────────
+  if (selectedEditMode === "color-video" || selectedEditMode === null) {
+    const midi = window.midiState;
+    const s = midi?.sliders || [0, 64, 64, 0, 64, 0, 0, 0, 100];
+
+    // Sliders map to creative parameters:
+    const pixelSize  = lerp(1, 52, (s[0] || 0) / 127);                 // [0] Pixelate block
+    const brightness = lerp(0.2, 2.5, (s[1] !== undefined ? s[1] : 64) / 127); // [1] Exposure
+    const saturation = lerp(0.0, 3.5, (s[2] !== undefined ? s[2] : 64) / 127); // [2] Chroma / Saturation
+    const hue        = lerp(0, 360, (s[3] || 0) / 127);                 // [3] Hue rotation (0-360°)
+    const contrast   = lerp(0.5, 3.0, (s[4] !== undefined ? s[4] : 64) / 127); // [4] Contrast
+    const blurPx     = lerp(0, 12, (s[5] || 0) / 127);                  // [5] Dream blur
+    const invertAmt  = lerp(0, 1, (s[6] || 0) / 127);                   // [6] Negative invert
+    const glitchAmt  = (s[7] || 0) / 127;                               // [7] Scanline Glitch
+    const volume     = (s[8] !== undefined ? s[8] : 100) / 127;         // [8] Volume
+
+    if (activeVideo) activeVideo.volume(volume);
+
+    // Build compound CSS filter string
+    const filters = [
+      `brightness(${brightness.toFixed(2)})`,
+      `saturate(${saturation.toFixed(2)})`,
+      `hue-rotate(${Math.round(hue)}deg)`,
+      `contrast(${contrast.toFixed(2)})`,
+    ];
+    if (blurPx > 0.3)   filters.push(`blur(${blurPx.toFixed(1)}px)`);
+    if (invertAmt > 0.05) filters.push(`invert(${invertAmt.toFixed(2)})`);
+
+    drawingContext.filter = filters.join(" ");
+    renderPixelated(pixelSize);
+    drawingContext.filter = "none";
+
+    // Dynamic scanline glitch displacement (controlled by Slider 7)
+    if (glitchAmt > 0.06) {
+      const numSlices = Math.floor(lerp(1, 10, glitchAmt));
+      for (let i = 0; i < numSlices; i++) {
+        if (random() < glitchAmt * 0.9) {
+          const sy = Math.floor(random(height));
+          const sh = Math.floor(random(4, 28));
+          const shift = Math.floor(random(-45, 45) * glitchAmt);
+          copy(0, sy, width, sh, shift, sy, width, sh);
+        }
+      }
+    }
+
+    // 8x8 Grid overlay with interactive pad glitches
+    drawMidiGridOverlay();
+
+    // Zero-delay color projection to APC pads
+    updateColorVideoProjection();
+
+    const connStr = midi?.connected ? "● APC CONNECTED" : "○ WAITING FOR APC";
+    drawVideoHUD(`COLOR VIDEO (${connStr})  |  SLIDERS: [0]PIX [1]BRIGHT [2]SAT [3]HUE [4]CONTRAST [5]BLUR [6]INVERT [7]GLITCH [8]VOL`);
   }
 }
 
 function drawVideoHUD(label) {
   noStroke();
+  fill(0, 0, 0, 160);
+  rect(0, 0, width, 32);
+
   fill(255);
   textAlign(LEFT, TOP);
   textFont(FONT);
-  textSize(14);
-  text(label, 20, 16);
+  textSize(13);
+  text(label, 20, 10);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -586,7 +783,6 @@ function drawDebuggerInfo() {
 
 // ─────────────────────────────────────────────────────────────
 // Fist check — requires ≥ 3 of 4 fingers curled
-// (1 finger curled = pinch gesture → not a fist)
 // ─────────────────────────────────────────────────────────────
 function checkIfFist(lm) {
   const w = lm[0];
@@ -604,9 +800,8 @@ function checkIfFist(lm) {
 // Tracking cursor / overlay
 // ─────────────────────────────────────────────────────────────
 function drawTrackingOverlay() {
-  const menuStates = ["MENU_VIEW", "EDIT_MODE_VIEW", "VIDEOS_PAGE"];
+  const menuStates = ["MENU_VIEW", "EDIT_MODE_VIEW", "VIDEOS_PAGE", "MUSIC_VIEW"];
 
-  // ── Menu navigation cursor ────────────────────────────────
   if (menuStates.includes(appState)) {
     const rh = getRightHand();
     if (!rh) return;
@@ -623,7 +818,6 @@ function drawTrackingOverlay() {
     return;
   }
 
-  // ── Camera & video: rainbow landmark skeleton ─────────────
   if (appState === "CAMERA_VIEW" || appState === "VIDEO_VIEW") {
     colorMode(HSB, 21, 100, 100);
     noStroke();
@@ -636,19 +830,17 @@ function drawTrackingOverlay() {
     }
     colorMode(RGB, 255);
 
-    // ── Pinky+thumb visual hint for effect-bomb / color-grade
+    // Pinky+thumb connector for gesture-driven modes (EFFECT BOMB & COLOR GRADE)
     if (appState === "VIDEO_VIEW" &&
         (selectedEditMode === "effect-bomb" || selectedEditMode === "color-grade")) {
       const lh = getLeftHand();
       if (lh) {
-        const pk      = lh.pinky.tipScreen;
-        const th      = lh.thumb.tipScreen;
-        const active  = isPinkyThumbTouching(lh);
-        // Connecting line
+        const pk     = lh.pinky.tipScreen;
+        const th     = lh.thumb.tipScreen;
+        const active = isPinkyThumbTouching(lh);
         stroke(active ? color(255, 220, 0) : color(200, 200, 200, 130));
         strokeWeight(active ? 3 : 1.5);
         line(pk.x, pk.y, th.x, th.y);
-        // Endpoint dots
         noStroke();
         fill(active ? color(255, 220, 0) : color(200, 200, 200, 180));
         ellipse(pk.x, pk.y, active ? 14 : 9);
@@ -660,18 +852,67 @@ function drawTrackingOverlay() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Keyboard — spacebar goes back one level
+// Keyboard & Window — F for fullscreen, S for stretch, spacebar goes back
 // ─────────────────────────────────────────────────────────────
 window.keyPressed = function () {
+  // 'F' key toggles browser fullscreen
+  if (key === "f" || key === "F") {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch(() => {});
+    } else {
+      document.exitFullscreen().catch(() => {});
+    }
+    return;
+  }
+
+  // 'S' key toggles stretch-to-fill on non-16:9 screens
+  if (key === "s" || key === "S") {
+    document.body.classList.toggle("fill-screen");
+    return;
+  }
+
   if (key !== " ") return;
   const back = {
-    CAMERA_VIEW:    () => setAppState("MENU_VIEW"),
-    MENU_VIEW:      () => setAppState("CAMERA_VIEW"),
-    EDIT_MODE_VIEW: () => setAppState("MENU_VIEW"),
-    VIDEOS_PAGE:    () => setAppState("EDIT_MODE_VIEW"),
-    VIDEO_VIEW:     () => { closeVideo(); setAppState("VIDEOS_PAGE"); },
+    CAMERA_VIEW:         () => setAppState("MENU_VIEW"),
+    MENU_VIEW:           () => setAppState("CAMERA_VIEW"),
+    EDIT_MODE_VIEW:      () => setAppState("MENU_VIEW"),
+    VIDEOS_PAGE:         () => setAppState("EDIT_MODE_VIEW"),
+    VIDEO_VIEW:          () => { closeVideo(); setAppState("VIDEOS_PAGE"); },
+    MUSIC_VIEW:          () => { if (window.resetMidiLights) window.resetMidiLights(); setAppState("MENU_VIEW"); },
+    CONTROL_WORLD_VIEW:  () => { if (window.resetMidiLights) window.resetMidiLights(); setAppState("MENU_VIEW"); },
   };
   back[appState]?.();
+};
+
+window.doubleClicked = function () {
+  if (!document.fullscreenElement) {
+    document.documentElement.requestFullscreen().catch(() => {});
+  } else {
+    document.exitFullscreen().catch(() => {});
+  }
+};
+
+window.mousePressed = function () {
+  if (appState === "MENU_VIEW") {
+    const pt = { x: mouseX, y: mouseY };
+    for (const btn of getModeButtons()) {
+      if (pointInRect(pt, btn)) {
+        if (btn.id === "video-edit") {
+          setAppState("EDIT_MODE_VIEW");
+        } else if (btn.id === "make-music") {
+          setAppState("MUSIC_VIEW");
+          if (window.MusicEngine) window.MusicEngine.init();
+        } else if (btn.id === "control-world") {
+          setAppState("CONTROL_WORLD_VIEW");
+          if (window.ControlWorld) window.ControlWorld.init();
+        }
+      }
+    }
+  } else if (appState === "MUSIC_VIEW" && window.MusicEngine) {
+    window.MusicEngine.handleClicks(null, true);
+  } else if (appState === "CONTROL_WORLD_VIEW" && window.ControlWorld) {
+    window.ControlWorld.handleMouseClick(mouseX, mouseY);
+  }
 };
 
 // ─────────────────────────────────────────────────────────────

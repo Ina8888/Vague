@@ -24,8 +24,8 @@
   // ── Shared state (read by colorful-track.js) ─────────────────────────────
   window.midiState = {
     connected:  false,
-    pads:       new Array(64).fill(false),   // [location] = pressed boolean
-    sliders:    new Array(9).fill(64),        // [location] = 0-127  (64 ≈ center)
+    pads:       new Array(64).fill(false),
+    sliders:    [0, 64, 64, 0, 64, 0, 0, 0, 100], // [0]pix, [1]bright, [2]sat, [3]hue, [4]contrast, [5]blur, [6]invert, [7]glitch, [8]vol
     horizontal: new Array(8).fill(false),
     vertical:   new Array(8).fill(false),
   };
@@ -35,6 +35,12 @@
   window.sendMidiLights = function (pads) {
     if (_ws && _ws.readyState === WebSocket.OPEN) {
       _ws.send(JSON.stringify({ type: "lights", pads }));
+    }
+  };
+
+  window.resetMidiLights = function () {
+    if (_ws && _ws.readyState === WebSocket.OPEN) {
+      _ws.send(JSON.stringify({ type: "reset" }));
     }
   };
 
